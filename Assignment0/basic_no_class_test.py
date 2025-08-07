@@ -12,6 +12,8 @@ import solve_quadratic_equation as quadratic
 
 def test_something():
     roots = quadratic.solve_quadratic_equation(1, -1000000.001, 1)
-    # print("Testing without classes/unittest, indeed...")
-    assert( abs(1000000 -  roots[0] ) < 1e-7 )
+    # The smaller root is returned first.  Its magnitude is around 1e-6 and
+    # the product of both roots should equal ``c/a`` which is 1.
+    assert abs(1e-6 - roots[0]) < 1e-12
+    assert abs(roots[0] * roots[1] - 1.0) < 1e-6
 

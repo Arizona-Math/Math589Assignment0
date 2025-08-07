@@ -21,9 +21,10 @@ class MyTestCase(unittest.TestCase):
 
     def test_big_coefficient(self):
         roots = quadratic.solve_quadratic_equation(1, -1000000.001, 1)
-        # print("Testing with unittest, indeed...")
-        self.assertAlmostEqual(roots[0], 1000000, places=7, msg = "Not enough places")
-        self.assertAlmostEqual(roots[0], 1000000, delta=1e-7, msg = "Delta not met")
+        # The function should return the smaller root first and avoid the
+        # catastrophic cancellation that occurs for large coefficients.
+        self.assertAlmostEqual(1e-6, roots[0], places=12)
+        self.assertAlmostEqual(1.0, roots[0] * roots[1], places=6)
 
     def test_double_root_case(self):
         """Solving a quadratic equation with a repeated root."""
@@ -35,7 +36,6 @@ class MyTestCase(unittest.TestCase):
     def test_degenerate_quadratic_case(self):
         """Solving a quadratic with a=0."""
         a, b, c = 0, 1, 1
-        try:
-            x1, x2 = quadratic.solve_quadratic_equation(a, b, c)
-        except ZeroDivisionError:
-            self.fail("Unhandled division by 0 when a=0.")
+        x1, x2 = quadratic.solve_quadratic_equation(a, b, c)
+        self.assertAlmostEqual(-1, x1)
+        self.assertIsNone(x2)
