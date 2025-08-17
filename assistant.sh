@@ -12,5 +12,5 @@ python repo_007.py \
   --repo https://github.com/${OWNER}/${REPO}.git \
   --task "Review code and propose patches" \
   --base main \
-  --branch-prefix main \
+  --branch-prefix ai/patch \
   --files "$LOCAL/**/*.py"
