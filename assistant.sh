@@ -13,4 +13,4 @@ python repo_007.py \
   --task "Review code and propose patches" \
   --base main \
   --branch-prefix ai/patch \
-  --files "$LOCAL/**/*.py"
+  --files "**/*.py"
