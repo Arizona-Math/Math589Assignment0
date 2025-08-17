@@ -114,7 +114,7 @@ def main():
     ap.add_argument("--task", required=True, help="Natural language task for GPT-5.")
     ap.add_argument("--base", default="main", help="Base branch (default: main)")
     ap.add_argument("--files", default="**/*.py", help="Comma-separated glob patterns relative to repo root")
-    ap.add_argument("--branch-prefix", default="ai/patch", help="Prefix for new branch name")
+    ap.add_argument("--branch-prefix", dest="branch_prefix", default="ai/patch", help="Prefix for new branch name")
     args = ap.parse_args()
 
     openai_key = os.getenv("OPENAI_API_KEY")
