@@ -124,7 +124,7 @@ def main():
         sys.exit(1)
 
     owner, repo = git_owner_repo(args.repo)
-    branch_name = f"{args.branch-prefix}/{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+    branch_name = f"{args.branch_prefix}/{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
     with tempfile.TemporaryDirectory() as d:
         run(f"git clone {shlex.quote(args.repo)} .", cwd=d)
         run(f"git fetch --all", cwd=d)
