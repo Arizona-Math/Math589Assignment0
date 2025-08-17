@@ -1,7 +1,6 @@
 #!/bin/sh
 OWNER='Arizona-Math'
 REPO='Math589Assignment0'
-LOCAL='./Math589Assignment0'
 GITHUB_TOKEN=`cat $HOME/Domains/GitHub/ForOpenAI.txt`
 OPENAI_API_KEY=`cat $HOME/Domains/OpenAI/GeneralKey.txt`
 
