@@ -1,8 +1,9 @@
 #!/bin/sh
 OWNER='Arizona-Math'
 REPO='Math589Assignment0'
-GITHUB_TOKEN=`cat $HOME/Domains/GitHub/ForOpenAI.txt`
-OPENAI_API_KEY=`cat $HOME/Domains/OpenAI/GeneralKey.txt`
+GITHUB_TOKEN=<GITHUB_TOKEN>
+OPENAI_API_KEY=<OPENAI_API_KEY>
+
 
 export GITHUB_TOKEN
 export OPENAI_API_KEY
