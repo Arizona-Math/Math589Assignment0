@@ -1,0 +1,6 @@
+pip install openai requests
+python repo_007.py \
+  --repo https://github.com/OWNER/REPO.git \
+  --task "Add a fast path to foo/bar.py and improve tests" \
+  --base main \
+  --files "foo/*.py,tests/**/*.py"

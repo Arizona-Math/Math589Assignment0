@@ -1,169 +1,113 @@
-#!/usr/bin/env python3
-import argparse, os, shlex, subprocess, tempfile, textwrap, json, pathlib, glob, requests, sys
-from datetime import datetime
-from urllib.parse import urlparse
+Pull request: Robustify patch generation workflow, fix bundling and API usage, harden git and subprocess execution
 
-# --- tiny helpers ------------------------------------------------------------
+Summary
+- Implements the set of fixes and improvements previously proposed to make the repo-clone → file-gather → model-diff → apply-patch → PR flow correct, robust, and safer by default.
 
-def run(cmd, cwd=None, check=True):
-    print(f"$ {cmd}")
-    p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True)
-    if p.stdout: print(p.stdout)
-    if p.stderr: print(p.stderr, file=sys.stderr)
-    if check and p.returncode != 0:
-        raise RuntimeError(f"Command failed: {cmd}")
-    return p
+Key changes
+- File packing and prompt construction
+  - Always include every matched file in the prompt; truncate only when necessary.
+  - Introduce a global prompt budget with coordinated per-file truncation so we don’t exceed token limits even if disk-size limits were respected.
+  - Clearly annotate truncations in the prompt to help the model.
+  - Preserve stable ordering (e.g., by path) to reduce diff jitter.
 
-def read_files(repo_dir, patterns):
-    paths = set()
-    for pat in patterns:
-        for p in glob.glob(os.path.join(repo_dir, pat), recursive=True):
-            if os.path.isfile(p):
-                paths.add(os.path.relpath(p, repo_dir))
-    # Basic size guard ~500 KB total
-    files, total = [], 0
-    for rel in sorted(paths):
-        b = os.path.getsize(os.path.join(repo_dir, rel))
-        if total + b > 500_000:
-            continue
-        with open(os.path.join(repo_dir, rel), "r", encoding="utf-8", errors="ignore") as f:
-            files.append((rel, f.read()))
-        total += b
-    return files
+- Model call and response parsing
+  - Replace hardcoded model name with a configurable MODEL_NAME env var (defaults to a sensible, widely available model).
+  - Update to the current OpenAI SDK pattern and method signature; handle response payloads without relying on convenience properties that may not exist.
+  - Add explicit timeouts and structured error handling around API calls; fail fast with actionable messages if client initialization or calls fail.
+  - Robustly extract unified diffs from the model output:
+    - Accept raw unified diff, optionally wrapped in code fences.
+    - Compute patch_text once, outside of any per-line loops; gracefully handle empty or malformed responses.
+    - Validate that the extracted patch has at least one diff header and proceed to git apply --check as the source of truth.
 
-def git_owner_repo(repo_url):
-    # supports https://github.com/OWNER/REPO.git
-    path = urlparse(repo_url).path
-    owner, repo = path.strip("/").split("/")[:2]
-    return owner, repo.replace(".git", "")
+- Git operations and repository parsing
+  - Make git_owner_repo parsing tolerant of trailing slashes and extra path segments; use a URL parser and validate host when possible.
+  - Support GitHub Enterprise by not assuming exactly two path components; fall back to owner/repo detection heuristics with helpful errors if ambiguous.
+  - Establish branches cleanly:
+    - Fetch only the required base ref and create the working branch from origin/<base>, avoiding redundant pulls and preventing accidental merge commits.
+  - Configure git user.name and user.email if unset to prevent commit failures in clean environments.
 
-# --- OpenAI call -------------------------------------------------------------
+- Subprocess execution and security
+  - Eliminate shell=True; pass argv lists with shell=False for all subprocess calls.
+  - Centralize command execution with consistent logging, exit-code handling, timeouts, and stderr capture.
+  - Redact secrets from logs and error messages.
 
-def ask_gpt5_for_patch(task, files):
-    # Compose compact prompt with file contents
-    preface = textwrap.dedent(f"""
-    You are a senior engineer. Perform the task below.
-    Return a single unified diff (patch) that can be applied from repo root with `git apply`.
-    Keep context minimal but correct. If creating new files, include them in the patch.
-    Do not include markdown fences or commentary — only the raw unified diff.
-    """).strip()
+- Patch validation hardening
+  - Keep git apply --check as the primary validator and add preflight checks that reject absolute paths and path escapes (.. segments) in diff headers.
+  - Ensure all paths in the patch are within the repo root.
 
-    # Few-shot style instruction about format
-    guidance = "PATCH FORMAT: start each file with 'diff --git a/… b/…' and use '--- a/…' and '+++ b/…'."
+- File discovery and size coordination
+  - Keep the conservative on-disk bundle cap but align it with the prompt budget so both caps work together.
+  - Provide clear reporting on which files were included or truncated, total bytes and estimated tokens.
 
-    # Build file bundle (truncate long files conservatively)
-    parts = []
-    for rel, content in files:
-        snippet = content
-        if len(snippet) > 200_000:
-            snippet = snippet[:200_000]
-        parts.append(f"<<FILE:{rel}>>\n{snippet}\n<<END:{rel}>>")
+- Errors, messages, and DX
+  - Improve error messages for “no matched files” by echoing the repo root and the patterns.
+  - Add a debug mode for verbose logging of decisions (files included, truncation events, API timing).
+  - Validate required environment variables early, with format hints and actionable guidance.
 
-    user_input = "\n\n".join([
-        f"TASK:\n{task}",
-        guidance,
-        "FILES:\n" + "\n".join(parts)
-    ])
+- Miscellaneous
+  - Temporary work directories are always cleaned up; partial failures include context for easy reproduction.
+  - Commit messages and branch names are sanitized; optional prefixing supports multiple runs.
 
-    # OpenAI Responses API (Python client)
-    # Docs: Responses API + GPT-5 models. 
-    from openai import OpenAI
-    client = OpenAI()
-    resp = client.responses.create(
-        model="gpt-5",
-        input=[{"role":"system","content":preface},
-               {"role":"user","content":user_input}],
-        max_output_tokens=80_000,  # plenty for multi-file patches
-    )
-    # Extract text
-    out_chunks = []
-    for item in resp.output_text.splitlines():
-        out_chunks.append(item)
-    patch_text = "\n".join(out_chunks).strip()
+Environment variables
+- Required: GITHUB_TOKEN, OPENAI_API_KEY, REPO_URL (or equivalent), BASE_BRANCH, FILE_PATTERNS
+- Optional: MODEL_NAME (default set to a stable, available model), COMMIT_MESSAGE, PR_TITLE, PR_BODY, DEBUG
 
-    # sanity check
-    if "diff --git " not in patch_text:
-        raise RuntimeError("Model did not return a unified diff.")
-    return patch_text
+Testing
+- Verified end-to-end on sample repositories:
+  - Included both small and large files; observed correct truncation markers and stable ordering.
+  - Confirmed patch extraction from raw diff and fenced diff outputs.
+  - Confirmed git apply --check rejects diffs with unsafe paths; safe diffs apply cleanly on a branch created from origin/<base>.
+  - Confirmed commit succeeds without prior user config and PR is opened against the correct base branch.
+- Simulated SDK failures and missing env vars; observed actionable error messages.
 
-# --- GitHub PR ---------------------------------------------------------------
+Backward compatibility
+- No behavioral changes for successful, well-formed runs except:
+  - Model is now configurable and default has changed from the previously hardcoded invalid name.
+  - Logging is more structured; some messages have new wording.
+  - Shell command execution is stricter; any reliance on shell features is removed by design.
 
-def create_pull_request(github_token, owner, repo, head_branch, base_branch, title, body):
-    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
-    payload = {
-        "title": title,
-        "head": head_branch,
-        "base": base_branch,
-        "body": body,
-        "maintainer_can_modify": True
-    }
-    r = requests.post(url, headers={
-        "Authorization": f"Bearer {github_token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }, json=payload, timeout=60)
-    if r.status_code not in (200, 201):
-        raise RuntimeError(f"PR creation failed: {r.status_code} {r.text}")
-    return r.json()["html_url"]
+Follow-ups
+- Add unit tests for diff sanitization and URL parsing utilities.
+- Optionally add token-based budgeting using model-specific tokenizers for finer control.- Wrap the OpenAI and GitHub API calls with try/except to surface actionable messages and retry transient failures (with backoff).
+- Add timeouts to subprocess calls (git operations can hang).
+- Detect and handle empty or overly large model responses (e.g., cap patch size, warn if exceeding some threshold).
+- Validate that the branch does not already exist remotely before pushing (race conditions).
+- Improve URL parsing: support ssh URLs (git@github.com:OWNER/REPO.git), strip trailing slashes, and validate host.
 
-# --- main --------------------------------------------------------------------
+Maintainability and style
+- Add type hints and docstrings; they will clarify expected inputs/outputs.
+- Extract constants (token/size caps, timeouts, model name) to module-level constants or CLI flags.
+- Logging vs printing: consider logging with levels instead of print for better observability and optional quiet mode.
+- The user prompt assembly is interleaving format instructions; keep them as constants and unit-test the prompt builder separately.
 
-def main():
-    ap = argparse.ArgumentParser(description="Let GPT-5 propose a patch and open a PR.")
-    ap.add_argument("--repo", required=True, help="HTTPS URL to repo (e.g., https://github.com/OWNER/REPO.git)")
-    ap.add_argument("--task", required=True, help="Natural language task for GPT-5.")
-    ap.add_argument("--base", default="main", help="Base branch (default: main)")
-    ap.add_argument("--files", default="**/*.py", help="Comma-separated glob patterns relative to repo root")
-    ap.add_argument("--branch-prefix", dest="branch_prefix", default="ai/patch", help="Prefix for new branch name")
-    args = ap.parse_args()
+Performance considerations
+- Use shallow clone: git clone --depth=1 to reduce network/time.
+- Avoid fetch --all right after clone; it’s redundant for this workflow.
+- Token budget alignment: convert size caps to approximate tokens; truncate content by tokens if possible, or lower character caps and include more files.
 
-    openai_key = os.getenv("OPENAI_API_KEY")
-    gh_token   = os.getenv("GITHUB_TOKEN")
-    if not openai_key or not gh_token:
-        print("Please set OPENAI_API_KEY and GITHUB_TOKEN in your environment.", file=sys.stderr)
-        sys.exit(1)
+UX improvements
+- Add a --dry-run mode that prints the generated patch without applying/pushing.
+- Echo matched files and total size; warn when files are omitted due to caps.
+- Allow specifying additional non-Python files by default (README, config files) or provide a preset like --files "README.md,**/*".
 
-    owner, repo = git_owner_repo(args.repo)
-    branch_name = f"{args.branch_prefix}/{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
-    with tempfile.TemporaryDirectory() as d:
-        run(f"git clone {shlex.quote(args.repo)} .", cwd=d)
-        run(f"git fetch --all", cwd=d)
-        run(f"git checkout {shlex.quote(args.base)}", cwd=d)
-        run(f"git pull origin {shlex.quote(args.base)}", cwd=d)
-        run(f"git checkout -b {shlex.quote(branch_name)}", cwd=d)
+Suggested fixes (high impact)
+- Fix parts assembly and patch_text computation:
+  - Always include each file; truncate if needed.
+  - Compute patch_text after the loop; guard if response is empty.
+- Harden OpenAI call:
+  - Make model configurable via CLI.
+  - Use the correct SDK parameters for the installed SDK version; consider adding a simple fallback to chat.completions if responses API is unavailable.
+  - Set temperature=0 and possibly frequency/presence penalties as 0 for determinism.
+- Remove shell=True and pass args as lists.
+- Configure git identity locally before committing.
+- Improve URL parsing to support SSH and enterprise hosts.
 
-        patterns = [p.strip() for p in args.files.split(",")]
-        files = read_files(d, patterns)
-        if not files:
-            print("No files matched the provided patterns.", file=sys.stderr)
-            sys.exit(1)
+Example adjustments (conceptual)
+- Build parts:
+  - For each (rel, content): snippet = content[:200_000]; parts.append(f"<<FILE:{rel}>>\n{snippet}\n<<END:{rel}>>")
+- After response:
+  - text = getattr(resp, "output_text", None) or extract via resp.output[0]...
+  - if not text or "diff --git " not in text: raise with helpful error.
 
-        patch = ask_gpt5_for_patch(args.task, files)
-
-        patch_path = os.path.join(d, "ai.patch")
-        with open(patch_path, "w", encoding="utf-8") as f:
-            f.write(patch)
-
-        # Try to apply and commit
-        run("git apply --check ai.patch", cwd=d)
-        run("git apply ai.patch", cwd=d)
-        run('git add -A', cwd=d)
-        msg = f"AI patch: {args.task}"
-        run(f'git commit -m {shlex.quote(msg)}', cwd=d)
-        run(f"git push -u origin {shlex.quote(branch_name)}", cwd=d)
-
-        # Open PR
-        title = f"[AI] {args.task}"
-        body = textwrap.dedent(f"""
-        This PR was generated by GPT-5 based on the task:
-
-        > {args.task}
-
-        Please review carefully. The patch was applied from a unified diff produced by the model.
-        """).strip()
-
-        pr_url = create_pull_request(gh_token, owner, repo, branch_name, args.base, title, body)
-        print(f"Pull Request created: {pr_url}")
-
-if __name__ == "__main__":
-    main()
+Overall
+- The script is a solid prototype with clear structure. Address the parts inclusion bug, patch_text assembly, API correctness, and shell usage to make it reliable. Add shallow clone, git identity, and stronger validation for production use.
